@@ -879,3 +879,65 @@ pub async fn get_ssh_public_keys(
 
     Ok(pubkeys)
 }
+
+pub async fn find_ssh_private_key(
+    state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
+    request_public_key: ssh_agent_lib::ssh_key::PublicKey,
+) -> anyhow::Result<ssh_agent_lib::ssh_key::PrivateKey> {
+    // TODO: the following block is simply copied over from rbw/actions.rs
+    // consider refactoring
+    let tty = std::env::var_os("RBW_TTY").or_else(|| {
+        rustix::termios::ttyname(std::io::stdin(), vec![])
+            .ok()
+            .map(|p| std::ffi::OsString::from_vec(p.as_bytes().to_vec()))
+    });
+    let env_vars = std::env::vars_os()
+        .filter(|(var_name, _)| {
+            (*rbw::protocol::ENVIRONMENT_VARIABLES_OS).contains(var_name)
+        })
+        .collect();
+    let environment = rbw::protocol::Environment::new(tty, env_vars);
+    unlock_state(state.clone(), &environment).await?;
+
+    let request_bytes = request_public_key.to_bytes();
+
+    let db = load_db().await?;
+
+    for entry in db.entries {
+        if let rbw::db::EntryData::SshKey { private_key, public_key, .. } = &entry.data {
+            let public_key_enc = match public_key {
+                Some(key) => key,
+                None => continue,
+            };
+            let public_key_plaintext = decrypt_cipher(
+                state.clone(),
+                &environment,
+                public_key_enc,
+                entry.key.as_deref(),
+                entry.org_id.as_deref(),
+            ).await?;
+            let public_key_bytes = ssh_agent_lib::ssh_key::PublicKey::from_openssh(&public_key_plaintext)
+                .map_err(anyhow::Error::new)?
+                .to_bytes();
+
+            if public_key_bytes == request_bytes {
+                let private_key_enc = private_key
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Matching entry has no private key"))?;
+
+                let private_key_plaintext = decrypt_cipher(
+                    state.clone(),
+                    &environment,
+                    private_key_enc,
+                    entry.key.as_deref(),
+                    entry.org_id.as_deref(),
+                ).await?;
+
+                return ssh_agent_lib::ssh_key::PrivateKey::from_openssh(private_key_plaintext)
+                    .map_err(anyhow::Error::new);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("No matching private key found"))
+}
