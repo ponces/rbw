@@ -48,7 +48,7 @@ pub fn parse_needle(arg: &str) -> Result<Needle, std::convert::Infallible> {
     Ok(Needle::Name(arg.to_string()))
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 struct DecryptedListCipher {
     id: String,
     name: Option<String>,
